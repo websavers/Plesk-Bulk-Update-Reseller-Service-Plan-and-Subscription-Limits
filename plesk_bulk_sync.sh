@@ -4,8 +4,8 @@ function main {
 
     [ "$(which plesk)" != "/sbin/plesk" ] && echo "Plesk not installed... exiting" && exit 1
 
-    while test $# -gt 0
-    do
+    #while test $# -gt 0
+    #do
         echo "$1 parameter provided."
 
         case "$1" in
@@ -26,22 +26,23 @@ function main {
         esac
 
         case "$1" in
+            --update-service-plans)
+                #ex: --update mbox_quota > 5G
+                #ex: --update oversell = false
+                update_subscription_parameter $2 $3
+                ;;
+        esac
+
+        # This is the only option that isn't reseller specific
+        case "$1" in
             --sync-all-subscriptions)
             sync_all_subscriptions
             ;;
         esac
 
-        case "$1" in
-            --update)
-                #ex: --update mbox_quota > 5G
-                #ex: --update oversell = false
-                update $2 $3 $4
-                ;;
-        esac
+        #shift
 
-        shift
-
-    done
+    #done
 
     exit 0
 
@@ -99,28 +100,69 @@ function sync_resellers {
 
 }
 
-function update {
+## 
+# Example Usage:
+# bash plesk_bulk_sync.sh --update mbox_quota 5G
+# The following will sync the parameter to the parent reseller plan value
+# bash plesk_bulk_sync.sh --update mbox_quota
+##
 
-    # Mail quota
-    PARAMETER=$2
-    COMPARE=$3
-    VALUE=$4
-    #VALUE="5242880" #5G
+function update_subscription_parameter {
 
-    # Obtain all (not-reseller) service plans owned by resellers
-    plesk db -Ne "SELECT Templates.name,clients.login FROM Templates LEFT JOIN clients ON Templates.owner_id=clients.id WHERE clients.type='reseller';" | 
-    while read -r result ; do
-        plan_name=$(echo $result | cut -f1 -d' ')
-        reseller_login=$(echo $result | cut -f2 -d' ')
+    PARAMETER=$1
+    VALUE=$2
+    SYNC_TO_RESELLER_SERVICE_PLAN=0
+    
+    echo "Parameter: $PARAMETER, Value: $VALUE"
 
-        echo "Checking service plan '$plan_name' owned by '$reseller_login'..."
-        existing=$(plesk bin service_plan -x "$plan_name" -owner "$reseller_login" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
-        if (( $existing $COMPARE $VALUE )); then
-            echo "Updating service plan '$plan_name' owned by '$reseller_login'... replacing current=$existing with new=$VALUE"
-            plesk bin service_plan --update "$plan_name" -owner "$reseller_login" -$PARAMETER ${VALUE}K
+    size_parameters=("mbox_quota" "disk_space" "max_traffic")
+    if [[ " ${size_parameters[@]} " =~ " $PARAMETER " ]]; then
+        COMPARE="-gt"
+        if [[ "$VALUE" =~ ^[0-9]+G$ ]]; then
+            COMPARE_VALUE=$(echo "$VALUE" | sed -nE 's/^([[:digit:]]+)G$/\1/p')
+            COMPARE_VALUE=$((COMPARE_VALUE * 1024 * 1024 * 1024))
+        elif [[ "$VALUE" =~ ^[0-9]+M ]]; then
+            COMPARE_VALUE=$(echo "$VALUE" | sed -nE 's/^([[:digit:]]+)M$/\1/p')
+            COMPARE_VALUE=$((COMPARE_VALUE * 1024 * 1024))
+        elif [[ "$VALUE" =~ ^[0-9]+K ]]; then
+            COMPARE_VALUE=$(echo "$VALUE" | sed -nE 's/^([[:digit:]]+)K$/\1/p')
+            COMPARE_VALUE=$((COMPARE_VALUE * 1024))
         else
-            echo "Skipping because $existing is not $COMPARE $VALUE"
+            COMPARE_VALUE=$VALUE
         fi
+    else
+        COMPARE="-eq"
+        COMPARE_VALUE=$VALUE
+    fi
+
+    #echo $COMPARE_VALUE ###DEBUG
+
+
+    # Obtain all service plans owned by resellers (Note: these are not reseller service plans)
+    # sed swaps tabs for commas, because bash var/output swaps tabs for 5 spaces, which isn't helpful
+    plesk db -Ne "SELECT Templates.name,clients.login FROM Templates LEFT JOIN clients ON Templates.owner_id=clients.id WHERE clients.type='reseller';" | sed 's/\t/,/g' | 
+    while read -r result ; do
+
+        plan_name=$(echo "$result" | cut -f1 -d',')
+        reseller_login=$(echo "$result" | cut -f2 -d',')
+
+        echo "Examining service plan '$plan_name' owned by '$reseller_login'..."
+
+        if [ "$VALUE" == "" ]; then
+            # Get Reseller Plan Info
+            reseller_service_plan_name=$(plesk bin reseller -i $reseller_login | sed -nE 's/^.*service plan "(.*)" of.*$/\1/p')
+            COMPARE_VALUE=$(plesk bin reseller_plan -x "$reseller_service_plan_name" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
+        fi
+
+        existing=$(plesk bin service_plan -x "$plan_name" -owner "$reseller_login" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
+
+        if [ "$existing" $COMPARE "$COMPARE_VALUE" ] || [ "$existing" -eq "-1" ]; then
+            echo "Updating service plan '$plan_name' owned by '$reseller_login'... replacing current=$existing with new=$VALUE"
+            plesk bin service_plan --update "$plan_name" -owner "$reseller_login" -$PARAMETER $VALUE
+        else
+            echo "Skipping because $existing is not $COMPARE $COMPARE_VALUE ($VALUE)"
+        fi
+
     done
 
     #plesk bin mail -u JDoe@example.com -mbox_quota 50M
