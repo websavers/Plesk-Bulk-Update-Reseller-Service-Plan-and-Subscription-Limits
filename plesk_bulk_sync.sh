@@ -50,18 +50,18 @@ function main {
 
 # https://support.plesk.com/hc/en-us/articles/12377770549015-How-to-synchronize-locked-subscriptions-with-their-service-plans
 
+# This refers to hosting subscriptions owned by resellers
 function sync_reseller_subscriptions {
     tmpfile=/tmp/locked_subscriptions.txt
     plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true' AND c.type='reseller'" > $tmpfile
-    [ -e "$tmpfile" ] && [ -s "$tmpfile" ] && sync_subscriptions $tmpfile
-    echo $?
+    sync_subscriptions $tmpfile
+    sync_resellers
 }
 
 function sync_all_subscriptions {
     tmpfile=/tmp/locked_subscriptions.txt
     plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true'" > /tmp/locked_subscriptions.txt
     [ -e "$tmpfile" ] && [ -s "$tmpfile" ] && sync_subscriptions $tmpfile
-    echo $?
 }
 
 function sync_subscriptions {
@@ -87,14 +87,15 @@ function sync_subscriptions {
 
 }
 
+# this refers to resellers themselves (ie: their 'subscription' created out of a reseller service plan)
 function sync_resellers {
 
-    plesk db -Ne "SELECT clients.login FROM clients WHERE clients.type='reseller';" | 
+    plesk db -sNe "SELECT c.login FROM clients c INNER JOIN Subscriptions s ON c.id=s.object_id WHERE s.object_type='client' AND s.locked='true' AND c.type='reseller'" | 
     while read -r r_username
     do
         echo "Trying to sync reseller $r_username..."
-        plesk bin reseller --unlock-subscription $r_username -force
-        plesk bin reseller --sync-subscription $r_username -force
+        plesk bin reseller --unlock-subscription $r_username
+        plesk bin reseller --sync-subscription $r_username
         echo ""
     done
 
