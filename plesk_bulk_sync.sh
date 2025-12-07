@@ -27,8 +27,8 @@ function main {
 
         case "$1" in
             --update-service-plans)
-                #ex: --update mbox_quota > 5G
-                #ex: --update oversell = false
+                #ex: --update-service-plans mbox_quota > 5G
+                #ex: --update-service-plans oversell = false
                 update_subscription_parameter $2 $3
                 ;;
         esac
@@ -111,7 +111,6 @@ function update_subscription_parameter {
 
     PARAMETER=$1
     VALUE=$2
-    SYNC_TO_RESELLER_SERVICE_PLAN=0
     
     echo "Parameter: $PARAMETER, Value: $VALUE"
 
@@ -131,7 +130,7 @@ function update_subscription_parameter {
             COMPARE_VALUE=$VALUE
         fi
     else
-        COMPARE="-eq"
+        COMPARE="!=" #string compare
         COMPARE_VALUE=$VALUE
     fi
 
@@ -156,7 +155,7 @@ function update_subscription_parameter {
 
         existing=$(plesk bin service_plan -x "$plan_name" -owner "$reseller_login" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
 
-        if [ "$existing" $COMPARE "$COMPARE_VALUE" ] || [ "$existing" -eq "-1" ]; then
+        if [ "$existing" $COMPARE "$COMPARE_VALUE" ] || [ "$existing" = "-1" ]; then
             echo "Updating service plan '$plan_name' owned by '$reseller_login'... replacing current=$existing with new=$VALUE"
             plesk bin service_plan --update "$plan_name" -owner "$reseller_login" -$PARAMETER $VALUE
         else
