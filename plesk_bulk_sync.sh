@@ -55,7 +55,6 @@ function sync_reseller_subscriptions {
     tmpfile=/tmp/locked_subscriptions.txt
     plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true' AND c.type='reseller'" > $tmpfile
     sync_subscriptions $tmpfile
-    sync_resellers
 }
 
 function sync_all_subscriptions {
