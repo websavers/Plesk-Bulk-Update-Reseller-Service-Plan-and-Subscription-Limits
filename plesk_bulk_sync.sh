@@ -32,10 +32,14 @@ function main {
         esac
 
         case "$1" in
-            --update-service-plans)
-                #ex: --update-service-plans mbox_quota > 5G
-                #ex: --update-service-plans oversell = false
-                update_subscription_parameter $2 $3
+            --update-reseller-owned-service-plans)
+                update_reseller_owned_service_plans $2 $3
+                ;;
+        esac
+
+        case "$1" in
+            --update-reseller-owned-subscriptions)
+                update_reseller_owned_subscriptions $2 $3
                 ;;
         esac
 
@@ -109,14 +113,7 @@ function sync_resellers {
 
 }
 
-## 
-# Example Usage:
-# bash plesk_bulk_sync.sh --update mbox_quota 5G
-# The following will sync the parameter to the parent reseller plan value
-# bash plesk_bulk_sync.sh --update mbox_quota
-##
-
-function update_subscription_parameter {
+function update_reseller_owned_service_plans {
 
     PARAMETER=$1
     VALUE=$2
@@ -152,10 +149,21 @@ function update_subscription_parameter {
             echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
         fi
 
+        read -p "Press any key to continue..." -n1 -s
+
     done
 
-    # The goal here is to target subscriptions that are not created from service plans
-    # Any that are tied to service plans will already have had the parameter updated in the above part
+}
+
+# The goal here is to target subscriptions that are not created from service plans
+# Any that are tied to service plans will already have had the parameter updated in the above part
+function update_reseller_owned_subscriptions {
+
+    PARAMETER=$1
+    VALUE=$2
+
+    echo "Parameter: $PARAMETER, Value: $VALUE"
+
     echo "Getting subscriptions owned by resellers..."
     get_reseller_subscriptions
     for domain in `cat $TMP_SUBSCRIPTION_LIST`
@@ -186,6 +194,8 @@ function update_subscription_parameter {
         else
             echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
         fi
+
+        read -p "Press any key to continue..." -n1 -s
 
     done
     
