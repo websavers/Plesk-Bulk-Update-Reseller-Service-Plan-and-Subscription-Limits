@@ -65,7 +65,7 @@ function main {
 
 # This refers to hosting subscriptions owned by resellers
 function get_reseller_subscriptions {
-    if [ "$1" -eq "only-locked" ]; then 
+    if [ "$1" == "only-locked" ]; then 
         plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true' AND c.type='reseller'" > $TMP_SUBSCRIPTION_LIST
     else
         plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND c.type='reseller'" > $TMP_SUBSCRIPTION_LIST
@@ -149,8 +149,6 @@ function update_reseller_owned_service_plans {
             echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
         fi
 
-        read -p "Press any key to continue..." -n1 -s
-
     done
 
 }
@@ -190,12 +188,11 @@ function update_reseller_owned_subscriptions {
 
         if [ "$existing" $COMPARE_WITH ] || [ "$existing" = "-1" ]; then
             echo "Updating subscription... replacing current=$existing with new=$VALUE"
-            plesk bin subscription --update "$domain" -$PARAMETER $VALUE
+            #Value is in bytes, hence the B
+            plesk bin subscription_settings --update "$domain" -$PARAMETER ${VALUE}B
         else
             echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
         fi
-
-        read -p "Press any key to continue..." -n1 -s
 
     done
     
@@ -228,7 +225,7 @@ function get_comparison {
         COMPARE_VALUE=$VALUE
     fi
 
-    echo "$COMPARE $COMPARE_VALUE"
+    echo "$COMPARE "$COMPARE_VALUE""
 }
 
 # Call main and pass in params
