@@ -1,5 +1,7 @@
 #!/bin/bash
 
+TMP_SUBSCRIPTION_LIST=/tmp/plesk_subscriptions.txt
+
 function main {
 
     [ "$(which plesk)" != "/sbin/plesk" ] && echo "Plesk not installed... exiting" && exit 1
@@ -10,7 +12,7 @@ function main {
 
         case "$1" in
             --sync-resellers)
-            sync_reseller_subscriptions
+            get_reseller_subscriptions && sync_subscriptions
             if [ "$?" -eq 0 ]; then 
                 sync_resellers
             else 
@@ -21,7 +23,11 @@ function main {
 
         case "$1" in
             --sync-reseller-subscriptions)
-            sync_reseller_subscriptions
+            if [ "$2" -eq "--only-locked" ]; then 
+                get_reseller_subscriptions "only-locked"
+            else
+                get_reseller_subscriptions
+            fi
             ;;
         esac
 
@@ -36,13 +42,16 @@ function main {
         # This is the only option that isn't reseller specific
         case "$1" in
             --sync-all-subscriptions)
-            sync_all_subscriptions
+            get_all_locked_subscriptions && sync_subscriptions
             ;;
         esac
 
         #shift
 
     #done
+
+    #Cleanup
+    rm -f $TMP_SUBSCRIPTION_LIST
 
     exit 0
 
@@ -51,29 +60,29 @@ function main {
 # https://support.plesk.com/hc/en-us/articles/12377770549015-How-to-synchronize-locked-subscriptions-with-their-service-plans
 
 # This refers to hosting subscriptions owned by resellers
-function sync_reseller_subscriptions {
-    tmpfile=/tmp/locked_subscriptions.txt
-    plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true' AND c.type='reseller'" > $tmpfile
-    sync_subscriptions $tmpfile
+function get_reseller_subscriptions {
+    if [ "$1" -eq "only-locked" ]; then 
+        plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true' AND c.type='reseller'" > $TMP_SUBSCRIPTION_LIST
+    else
+        plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id INNER JOIN clients c ON d.cl_id=c.id WHERE d.webspace_id=0 AND s.object_type='domain' AND c.type='reseller'" > $TMP_SUBSCRIPTION_LIST
+    fi    
 }
 
-function sync_all_subscriptions {
-    tmpfile=/tmp/locked_subscriptions.txt
-    plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true'" > /tmp/locked_subscriptions.txt
-    [ -e "$tmpfile" ] && [ -s "$tmpfile" ] && sync_subscriptions $tmpfile
+function get_all_locked_subscriptions {
+    plesk db -sNe "SELECT name FROM domains d INNER JOIN Subscriptions s ON d.id=s.object_id WHERE d.webspace_id=0 AND s.object_type='domain' AND s.locked='true'" > $TMP_SUBSCRIPTION_LIST
 }
 
 function sync_subscriptions {
 
-    sub_list=$1
     error=0
 
     #unlock and sync
-    for domain in `cat $sub_list`
+    for domain in `cat $TMP_SUBSCRIPTION_LIST`
     do
-        echo "Trying to sync reseller subscription with primary domain: $domain"
+        echo "Unlocking subscription with primary domain: $domain"
         plesk bin subscription --unlock-subscription $domain
         [ $? -gt 0 ] && error=1
+        echo "Syncing subscription with primary domain: $domain"
         plesk bin subscription --sync-subscription $domain
         [ $? -gt 0 ] && error=1
     done
@@ -114,7 +123,82 @@ function update_subscription_parameter {
     
     echo "Parameter: $PARAMETER, Value: $VALUE"
 
+    echo "Getting service plans owned by resellers..."
+    # Obtain all service plans owned by resellers (Note: these are not reseller service plans)
+    # sed swaps tabs for commas, because bash var/output swaps tabs for 5 spaces, which isn't helpful
+    plesk db -Ne "SELECT Templates.name,clients.login FROM Templates LEFT JOIN clients ON Templates.owner_id=clients.id WHERE clients.type='reseller';" | sed 's/\t/,/g' | 
+    while read -r result
+    do
+
+        plan_name=$(echo "$result" | cut -f1 -d',')
+        reseller_login=$(echo "$result" | cut -f2 -d',')
+
+        echo "Examining service plan '$plan_name' owned by '$reseller_login'..."
+
+        if [ "$VALUE" == "" ]; then
+            # Get Reseller Plan Info
+            reseller_service_plan_name=$(plesk bin reseller -i $reseller_login | sed -nE 's/^.*service plan "(.*)" of.*$/\1/p')
+            VALUE=$(plesk bin reseller_plan -x "$reseller_service_plan_name" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
+        fi
+
+        COMPARE_WITH=$(get_comparison $PARAMETER $VALUE)
+
+        existing=$(plesk bin service_plan -x "$plan_name" -owner "$reseller_login" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
+
+        if [ "$existing" $COMPARE_WITH ] || [ "$existing" = "-1" ]; then
+            echo "Updating service plan '$plan_name' owned by '$reseller_login'... replacing current=$existing with new=$VALUE"
+            plesk bin service_plan --update "$plan_name" -owner "$reseller_login" -$PARAMETER $VALUE
+        else
+            echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
+        fi
+
+    done
+
+    # The goal here is to target subscriptions that are not created from service plans
+    # Any that are tied to service plans will already have had the parameter updated in the above part
+    echo "Getting subscriptions owned by resellers..."
+    get_reseller_subscriptions
+    for domain in `cat $TMP_SUBSCRIPTION_LIST`
+    do
+
+        echo "Examining subscription with primary domain: $domain..."
+
+        subscription_id=$(plesk bin subscription -i "$domain" | sed -nE 's/^Domain ID:\s+(.*)$/\1/p')
+
+        existing=$(plesk db -Ne "SELECT Limits.value FROM Limits LEFT JOIN SubscriptionProperties ON Limits.id=SubscriptionProperties.value WHERE Limits.limit_name='$PARAMETER' AND SubscriptionProperties.subscription_id=$subscription_id AND SubscriptionProperties.name='limitsId';" | sed 's/\t/,/g')
+        if [ "$existing" = "" ]; then
+            echo "Skipping $domain - does not have separate config from parent service plan"
+            continue
+        fi
+
+        if [ "$VALUE" = "" ]; then
+            # Get Reseller Plan Info
+            reseller_login=$(plesk bin subscription -i "$domain" | sed -nE "s/^Owner's contact name:.*\((.*)\)$/\1/p")
+            reseller_service_plan_name=$(plesk bin reseller -i $reseller_login | sed -nE 's/^.*service plan "(.*)" of.*$/\1/p')
+            VALUE=$(plesk bin reseller_plan -x "$reseller_service_plan_name" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
+        fi
+
+        COMPARE_WITH=$(get_comparison $PARAMETER $VALUE)
+
+        if [ "$existing" $COMPARE_WITH ] || [ "$existing" = "-1" ]; then
+            echo "Updating subscription... replacing current=$existing with new=$VALUE"
+            plesk bin subscription --update "$domain" -$PARAMETER $VALUE
+        else
+            echo "Skipping because $existing is not $COMPARE_WITH ($VALUE)"
+        fi
+
+    done
+    
+}
+
+## Helper Function ##
+
+function get_comparison {
+
+    local PARAMETER=$1
+    local VALUE=$2
     size_parameters=("mbox_quota" "disk_space" "max_traffic")
+
     if [[ " ${size_parameters[@]} " =~ " $PARAMETER " ]]; then
         COMPARE="-gt"
         if [[ "$VALUE" =~ ^[0-9]+G$ ]]; then
@@ -134,37 +218,7 @@ function update_subscription_parameter {
         COMPARE_VALUE=$VALUE
     fi
 
-    #echo $COMPARE_VALUE ###DEBUG
-
-
-    # Obtain all service plans owned by resellers (Note: these are not reseller service plans)
-    # sed swaps tabs for commas, because bash var/output swaps tabs for 5 spaces, which isn't helpful
-    plesk db -Ne "SELECT Templates.name,clients.login FROM Templates LEFT JOIN clients ON Templates.owner_id=clients.id WHERE clients.type='reseller';" | sed 's/\t/,/g' | 
-    while read -r result ; do
-
-        plan_name=$(echo "$result" | cut -f1 -d',')
-        reseller_login=$(echo "$result" | cut -f2 -d',')
-
-        echo "Examining service plan '$plan_name' owned by '$reseller_login'..."
-
-        if [ "$VALUE" == "" ]; then
-            # Get Reseller Plan Info
-            reseller_service_plan_name=$(plesk bin reseller -i $reseller_login | sed -nE 's/^.*service plan "(.*)" of.*$/\1/p')
-            COMPARE_VALUE=$(plesk bin reseller_plan -x "$reseller_service_plan_name" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
-        fi
-
-        existing=$(plesk bin service_plan -x "$plan_name" -owner "$reseller_login" | sed -nE "s/^.*<service-plan-item name=\"$PARAMETER\">(.*)<.*$/\1/p")
-
-        if [ "$existing" $COMPARE "$COMPARE_VALUE" ] || [ "$existing" = "-1" ]; then
-            echo "Updating service plan '$plan_name' owned by '$reseller_login'... replacing current=$existing with new=$VALUE"
-            plesk bin service_plan --update "$plan_name" -owner "$reseller_login" -$PARAMETER $VALUE
-        else
-            echo "Skipping because $existing is not $COMPARE $COMPARE_VALUE ($VALUE)"
-        fi
-
-    done
-
-    #plesk bin mail -u JDoe@example.com -mbox_quota 50M
+    echo "$COMPARE $COMPARE_VALUE"
 }
 
 # Call main and pass in params
